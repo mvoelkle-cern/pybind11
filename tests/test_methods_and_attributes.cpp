@@ -111,19 +111,25 @@ public:
 class CppDerivedDynamicClass : public DynamicClass { };
 
 // py::arg/py::arg_v testing: these arguments just record their argument when invoked
-class ArgInspector1 { public: std::string arg = "(default arg inspector 1)"; };
-class ArgInspector2 { public: std::string arg = "(default arg inspector 2)"; };
+struct ArgInspector1 {
+    std::string arg = "(default arg inspector 1)";
+    ArgInspector1() = default;
+    ArgInspector1(std::string arg) : arg(std::move(arg)) { }
+};
+struct ArgInspector2 {
+    std::string arg = "(default arg inspector 2)";
+    ArgInspector2() = default;
+    ArgInspector2(std::string arg) : arg(std::move(arg)) { }
+};
 class ArgAlwaysConverts { };
 namespace pybind11 { namespace detail {
 template <> struct type_caster<ArgInspector1> {
 public:
-    PYBIND11_TYPE_CASTER(ArgInspector1, _("ArgInspector1"));
+    PYBIND11_TYPE_CASTER2(ArgInspector1, _("ArgInspector1"));
 
-    bool load(handle src, bool convert) {
-        value.arg = "loading ArgInspector1 argument " +
-            std::string(convert ? "WITH" : "WITHOUT") + " conversion allowed.  "
-            "Argument value = " + (std::string) str(src);
-        return true;
+    static maybe<ArgInspector1> try_load(handle src, bool convert) {
+        return "loading ArgInspector1 argument " + std::string(convert ? "WITH" : "WITHOUT")
+               + " conversion allowed.  Argument value = " + (std::string) str(src);
     }
 
     static handle cast(const ArgInspector1 &src, return_value_policy, handle) {
@@ -132,13 +138,11 @@ public:
 };
 template <> struct type_caster<ArgInspector2> {
 public:
-    PYBIND11_TYPE_CASTER(ArgInspector2, _("ArgInspector2"));
+    PYBIND11_TYPE_CASTER2(ArgInspector2, _("ArgInspector2"));
 
-    bool load(handle src, bool convert) {
-        value.arg = "loading ArgInspector2 argument " +
-            std::string(convert ? "WITH" : "WITHOUT") + " conversion allowed.  "
-            "Argument value = " + (std::string) str(src);
-        return true;
+    static maybe<ArgInspector2> try_load(handle src, bool convert) {
+        return "loading ArgInspector2 argument " + std::string(convert ? "WITH" : "WITHOUT")
+               + " conversion allowed.  Argument value = " + (std::string) str(src);
     }
 
     static handle cast(const ArgInspector2 &src, return_value_policy, handle) {
@@ -147,10 +151,10 @@ public:
 };
 template <> struct type_caster<ArgAlwaysConverts> {
 public:
-    PYBIND11_TYPE_CASTER(ArgAlwaysConverts, _("ArgAlwaysConverts"));
+    PYBIND11_TYPE_CASTER2(ArgAlwaysConverts, _("ArgAlwaysConverts"));
 
-    bool load(handle, bool convert) {
-        return convert;
+    static maybe<ArgAlwaysConverts> try_load(handle, bool convert) {
+        return convert ? ArgAlwaysConverts{} : maybe<ArgAlwaysConverts>{};
     }
 
     static handle cast(const ArgAlwaysConverts &, return_value_policy, handle) {

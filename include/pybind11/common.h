@@ -547,9 +547,16 @@ template <class T, template<class> class... Predicates> using satisfies_any_of =
 template <class T, template<class> class... Predicates> using satisfies_none_of = none_of<Predicates<T>...>;
 
 /// Strip the class from a method type
-template <typename T> struct remove_class { };
-template <typename C, typename R, typename... A> struct remove_class<R (C::*)(A...)> { typedef R type(A...); };
-template <typename C, typename R, typename... A> struct remove_class<R (C::*)(A...) const> { typedef R type(A...); };
+template <typename T> struct remove_class;
+
+template <typename C, typename R, typename... A>
+struct remove_class<R (C::*)(A...) const> : remove_class<R (C::*)(A...)> { };
+
+template <typename C, typename R, typename... A>
+struct remove_class<R (C::*)(A...)> {
+    using type = R (A...);
+    static constexpr auto num_args = sizeof...(A);
+};
 
 /// Helper template to strip away type modifiers
 template <typename T> struct intrinsic_type                       { typedef T type; };
@@ -632,9 +639,9 @@ struct is_template_base_of_impl {
 /// `is_template_base_of<Base, T>` is true if `struct T : Base<U> {}` where U can be anything
 template <template<typename...> class Base, typename T>
 #if !defined(_MSC_VER)
-using is_template_base_of = decltype(is_template_base_of_impl<Base>::check((remove_cv_t<T>*)nullptr));
+using is_template_base_of = decltype(is_template_base_of_impl<Base>::check((intrinsic_t<T>*)nullptr));
 #else // MSVC2015 has trouble with decltype in template aliases
-struct is_template_base_of : decltype(is_template_base_of_impl<Base>::check((remove_cv_t<T>*)nullptr)) { };
+struct is_template_base_of : decltype(is_template_base_of_impl<Base>::check((intrinsic_t<T>*)nullptr)) { };
 #endif
 
 /// Check if T is an instantiation of the template `Class`. For example:
@@ -662,6 +669,21 @@ inline void ignore_unused(const int *) { }
 #else
 using expand_side_effects = bool[];
 #define PYBIND11_EXPAND_SIDE_EFFECTS(PATTERN) pybind11::detail::expand_side_effects{ ((PATTERN), void(), false)..., false }
+#endif
+
+/// Backward compatible version of a C++17 pack fold
+#ifdef __cpp_fold_expressions
+template <typename... Bools>
+constexpr bool all_fold(Bools... bools) { return (... && bools); }
+#else
+constexpr bool all_fold() { return true; }
+constexpr bool all_fold(bool a) { return a; }
+constexpr bool all_fold(bool a, bool b) { return a && b; }
+constexpr bool all_fold(bool a, bool b, bool c) { return a && b && c; }
+template <typename... Bools>
+constexpr bool all_fold(bool a, bool b, bool c, bool d, Bools... bools) {
+    return a && b && c && d && all_fold(bools...);
+}
 #endif
 
 NAMESPACE_END(detail)

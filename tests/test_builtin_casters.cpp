@@ -101,7 +101,7 @@ TEST_SUBMODULE(builtin_casters, m) {
     m.def("cast_nullptr_t", []() { return std::nullptr_t{}; });
 
     // test_reference_wrapper
-    m.def("refwrap_builtin", [](std::reference_wrapper<int> p) { return 10 * p.get(); });
+    m.def("refwrap_builtin", [](const std::reference_wrapper<const int> &p) { return 10 * p.get(); });
     m.def("refwrap_usertype", [](std::reference_wrapper<UserType> p) { return p.get().value(); });
     // Not currently supported (std::pair caster has return-by-value cast operator);
     // triggers static_assert failure.

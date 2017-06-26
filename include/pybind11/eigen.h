@@ -249,38 +249,38 @@ struct type_caster<Type, enable_if_t<is_eigen_dense_plain<Type>::value>> {
     using Scalar = typename Type::Scalar;
     using props = EigenProps<Type>;
 
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
         // If we're in no-convert mode, only load if given an array of the correct type
         if (!convert && !isinstance<array_t<Scalar>>(src))
-            return false;
+            return {};
 
         // Coerce into an array, but don't do type conversion yet; the copy below handles it.
         auto buf = array::ensure(src);
 
         if (!buf)
-            return false;
+            return {};
 
         auto dims = buf.ndim();
         if (dims < 1 || dims > 2)
-            return false;
+            return {};
 
         auto fits = props::conformable(buf);
         if (!fits)
-            return false;
+            return {};
 
         // Allocate the new type, then build a numpy reference into it
-        value = Type(fits.rows, fits.cols);
-        auto ref = reinterpret_steal<array>(eigen_ref_array<props>(value));
+        auto value = maybe<Type>(in_place, fits.rows, fits.cols);
+        auto ref = reinterpret_steal<array>(eigen_ref_array<props>(*value));
         if (dims == 1) ref = ref.squeeze();
 
         int result = detail::npy_api::get().PyArray_CopyInto_(ref.ptr(), buf.ptr());
 
         if (result < 0) { // Copy failed!
             PyErr_Clear();
-            return false;
+            return {};
         }
 
-        return true;
+        return value;
     }
 
 private:
@@ -338,14 +338,6 @@ public:
     }
 
     static PYBIND11_DESCR name() { return props::descriptor(); }
-
-    operator Type*() { return &value; }
-    operator Type&() { return value; }
-    operator Type&&() && { return std::move(value); }
-    template <typename T> using cast_op_type = movable_cast_op_type<T>;
-
-private:
-    Type value;
 };
 
 // Eigen Ref/Map classes have slightly different policy requirements, meaning we don't want to force
@@ -387,12 +379,10 @@ public:
 
     static PYBIND11_DESCR name() { return props::descriptor(); }
 
-    // Explicitly delete these: support python -> C++ conversion on these (i.e. these can be return
+    // Explicitly delete load: support python -> C++ conversion on these (i.e. these can be return
     // types but not bound arguments).  We still provide them (with an explicitly delete) so that
     // you end up here if you try anyway.
-    bool load(handle, bool) = delete;
-    operator MapType() = delete;
-    template <typename> using cast_op_type = MapType;
+    static void try_load(handle, bool) = delete;
 };
 
 // We can return any map-like object (but can only load Refs, specialized next):
@@ -415,18 +405,17 @@ private:
                 ((props::row_major ? props::inner_stride : props::outer_stride) == 1 ? array::c_style :
                  (props::row_major ? props::outer_stride : props::inner_stride) == 1 ? array::f_style : 0)>;
     static constexpr bool need_writeable = is_eigen_mutable_map<Type>::value;
-    // Delay construction (these have no default constructor)
-    std::unique_ptr<MapType> map;
-    std::unique_ptr<Type> ref;
-    // Our array.  When possible, this is just a numpy array pointing to the source data, but
-    // sometimes we can't avoid copying (e.g. input is not a numpy array at all, has an incompatible
-    // layout, or is an array of a type that needs to be converted).  Using a numpy temporary
-    // (rather than an Eigen temporary) saves an extra copy when we need both type conversion and
-    // storage order conversion.  (Note that we refuse to use this temporary copy when loading an
-    // argument for a Ref<M> with M non-const, i.e. a read-write reference).
-    Array copy_or_ref;
+
 public:
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
+        // Our array.  When possible, this is just a numpy array pointing to the source data, but
+        // sometimes we can't avoid copying (e.g. input is not a numpy array at all, has an incompatible
+        // layout, or is an array of a type that needs to be converted).  Using a numpy temporary
+        // (rather than an Eigen temporary) saves an extra copy when we need both type conversion and
+        // storage order conversion.  (Note that we refuse to use this temporary copy when loading an
+        // argument for a Ref<M> with M non-const, i.e. a read-write reference).
+        Array copy_or_ref;
+
         // First check whether what we have is already an array of the right type.  If not, we can't
         // avoid a copy (because the copy is also going to do type conversion).
         bool need_copy = !isinstance<Array>(src);
@@ -439,7 +428,7 @@ public:
 
             if (aref && (!need_writeable || aref.writeable())) {
                 fits = props::conformable(aref);
-                if (!fits) return false; // Incompatible dimensions
+                if (!fits) return {}; // Incompatible dimensions
                 if (!fits.template stride_compatible<props>())
                     need_copy = true;
                 else
@@ -454,34 +443,27 @@ public:
             // We need to copy: If we need a mutable reference, or we're not supposed to convert
             // (either because we're in the no-convert overload pass, or because we're explicitly
             // instructed not to copy (via `py::arg().noconvert()`) we have to fail loading.
-            if (!convert || need_writeable) return false;
+            if (!convert || need_writeable) return {};
 
             Array copy = Array::ensure(src);
-            if (!copy) return false;
+            if (!copy) return {};
             fits = props::conformable(copy);
             if (!fits || !fits.template stride_compatible<props>())
-                return false;
+                return {};
             copy_or_ref = std::move(copy);
             loader_life_support::add_patient(copy_or_ref);
         }
 
-        ref.reset();
-        map.reset(new MapType(data(copy_or_ref), fits.rows, fits.cols, make_stride(fits.stride.outer(), fits.stride.inner())));
-        ref.reset(new Type(*map));
-
-        return true;
+        return MapType(data(copy_or_ref), fits.rows, fits.cols,
+                       make_stride(fits.stride.outer(), fits.stride.inner()));
     }
-
-    operator Type*() { return ref.get(); }
-    operator Type&() { return *ref; }
-    template <typename _T> using cast_op_type = pybind11::detail::cast_op_type<_T>;
 
 private:
     template <typename T = Type, enable_if_t<is_eigen_mutable_map<T>::value, int> = 0>
-    Scalar *data(Array &a) { return a.mutable_data(); }
+    static Scalar *data(Array &a) { return a.mutable_data(); }
 
     template <typename T = Type, enable_if_t<!is_eigen_mutable_map<T>::value, int> = 0>
-    const Scalar *data(Array &a) { return a.data(); }
+    static const Scalar *data(Array &a) { return a.data(); }
 
     // Attempt to figure out a constructor of `Stride` that will work.
     // If both strides are fixed, use a default constructor:
@@ -516,7 +498,7 @@ private:
 
 // type_caster for special matrix types (e.g. DiagonalMatrix), which are EigenBase, but not
 // EigenDense (i.e. they don't have a data(), at least not with the usual matrix layout).
-// load() is not supported, but we can cast them into the python domain by first copying to a
+// try_load() is not supported, but we can cast them into the python domain by first copying to a
 // regular Eigen::Matrix, then casting that.
 template <typename Type>
 struct type_caster<Type, enable_if_t<is_eigen_other<Type>::value>> {
@@ -532,12 +514,10 @@ public:
 
     static PYBIND11_DESCR name() { return props::descriptor(); }
 
-    // Explicitly delete these: support python -> C++ conversion on these (i.e. these can be return
+    // Explicitly delete load: support python -> C++ conversion on these (i.e. these can be return
     // types but not bound arguments).  We still provide them (with an explicitly delete) so that
     // you end up here if you try anyway.
-    bool load(handle, bool) = delete;
-    operator Type() = delete;
-    template <typename> using cast_op_type = Type;
+    static void try_load(handle, bool) = delete;
 };
 
 template<typename Type>
@@ -547,9 +527,9 @@ struct type_caster<Type, enable_if_t<is_eigen_sparse<Type>::value>> {
     typedef typename Type::Index Index;
     static constexpr bool rowMajor = Type::IsRowMajor;
 
-    bool load(handle src, bool) {
+    static maybe<Type> try_load(handle src, bool) {
         if (!src)
-            return false;
+            return {};
 
         auto obj = reinterpret_borrow<object>(src);
         object sparse_module = module::import("scipy.sparse");
@@ -560,7 +540,7 @@ struct type_caster<Type, enable_if_t<is_eigen_sparse<Type>::value>> {
             try {
                 obj = matrix_type(obj);
             } catch (const error_already_set &) {
-                return false;
+                return {};
             }
         }
 
@@ -571,13 +551,12 @@ struct type_caster<Type, enable_if_t<is_eigen_sparse<Type>::value>> {
         auto nnz = obj.attr("nnz").cast<Index>();
 
         if (!values || !innerIndices || !outerIndices)
-            return false;
+            return {};
 
-        value = Eigen::MappedSparseMatrix<Scalar, Type::Flags, StorageIndex>(
+        return Eigen::MappedSparseMatrix<Scalar, Type::Flags, StorageIndex>(
             shape[0].cast<Index>(), shape[1].cast<Index>(), nnz,
-            outerIndices.mutable_data(), innerIndices.mutable_data(), values.mutable_data());
-
-        return true;
+            outerIndices.mutable_data(), innerIndices.mutable_data(), values.mutable_data()
+        );
     }
 
     static handle cast(const Type &src, return_value_policy /* policy */, handle /* parent */) {
@@ -596,7 +575,7 @@ struct type_caster<Type, enable_if_t<is_eigen_sparse<Type>::value>> {
         ).release();
     }
 
-    PYBIND11_TYPE_CASTER(Type, _<(Type::IsRowMajor) != 0>("scipy.sparse.csr_matrix[", "scipy.sparse.csc_matrix[")
+    PYBIND11_TYPE_CASTER2(Type, _<(Type::IsRowMajor) != 0>("scipy.sparse.csr_matrix[", "scipy.sparse.csc_matrix[")
             + npy_format_descriptor<Scalar>::name() + _("]"));
 };
 

@@ -41,6 +41,59 @@
 #include "class_support.h"
 
 NAMESPACE_BEGIN(pybind11)
+NAMESPACE_BEGIN(detail)
+
+/// Helper class which calls a C++ function after loading arguments from Python
+template <typename Capture, typename Policies, typename Guard,
+          typename Return, typename... Args>
+struct caller {
+    using caster_return = conditional_t<std::is_void<Return>::value, void_type, Return>;
+
+    template <typename... Ms>
+    static handle call(function_call &fc, Ms &&...maybes) {
+        /* Check that all the arguments were succesfully cast into the C++ domain */
+        if (!all_fold(maybes.has_value()...))
+            return PYBIND11_TRY_NEXT_OVERLOAD;
+
+        /* Invoke call policy pre-call hook */
+        Policies::precall(fc);
+
+        /* Get a pointer to the capture object */
+        auto *data = sizeof(Capture) <= sizeof(fc.func.data) ? &fc.func.data : *fc.func.data;
+        auto *cap = const_cast<Capture *>(reinterpret_cast<const Capture *>(data));
+
+        /* Override policy for rvalues -- usually to enforce rvp::move on an rvalue */
+        const auto policy = return_value_policy_override<Return>::policy(fc.func.policy);
+
+        /* Perform the function call */
+        auto result = make_caster<caster_return>::cast(
+            with_guard(cap->f, std::forward<Ms>(maybes)...), policy, fc.parent
+        );
+
+        /* Invoke call policy post-call hook */
+        Policies::postcall(fc, result);
+
+        return result;
+    };
+
+    template <typename F, typename... Ms>
+    static caster_return with_guard(F &func, Ms &&...ms) {
+        return call_impl(std::is_void<Return>{}, Guard{}, func, std::forward<Ms>(ms)...);
+    }
+
+    template <typename F, typename... Ms>
+    static Return call_impl(std::false_type/*returns_void*/, Guard &&, F &func, Ms &&...ms) {
+        return func(extract<Args>(std::forward<Ms>(ms))...);
+    }
+
+    template <typename F, typename... Ms>
+    static void_type call_impl(std::true_type/*returns_void*/, Guard &&, F &func, Ms &&...ms) {
+        func(extract<Args>(std::forward<Ms>(ms))...);
+        return {};
+    }
+};
+
+NAMESPACE_END(detail)
 
 /// Wraps an arbitrary C++ function/method/lambda function/.. into a callable Python object
 class cpp_function : public function {
@@ -50,7 +103,7 @@ public:
     /// Construct a cpp_function from a vanilla function pointer
     template <typename Return, typename... Args, typename... Extra>
     cpp_function(Return (*f)(Args...), const Extra&... extra) {
-        initialize(f, f, extra...);
+        initialize(f, f, detail::make_index_sequence<sizeof...(Args)>{}, extra...);
     }
 
     /// Construct a cpp_function from a lambda function (possibly with internal state)
@@ -61,38 +114,43 @@ public:
         >::value>
     >
     cpp_function(Func &&f, const Extra&... extra) {
-        using FuncType = typename detail::remove_class<decltype(&detail::remove_reference_t<Func>::operator())>::type;
-        initialize(std::forward<Func>(f),
-                   (FuncType *) nullptr, extra...);
+        using signature = detail::remove_class<decltype(&detail::remove_reference_t<Func>::operator())>;
+        initialize(std::forward<Func>(f), (typename signature::type *) nullptr,
+                   detail::make_index_sequence<signature::num_args>{}, extra...);
     }
 
     /// Construct a cpp_function from a class method (non-const)
     template <typename Return, typename Class, typename... Arg, typename... Extra>
     cpp_function(Return (Class::*f)(Arg...), const Extra&... extra) {
         initialize([f](Class *c, Arg... args) -> Return { return (c->*f)(args...); },
-                   (Return (*) (Class *, Arg...)) nullptr, extra...);
+                   (Return (*) (Class *, Arg...)) nullptr,
+                   detail::make_index_sequence<sizeof...(Arg) + 1>{}, extra...);
     }
 
     /// Construct a cpp_function from a class method (const)
     template <typename Return, typename Class, typename... Arg, typename... Extra>
     cpp_function(Return (Class::*f)(Arg...) const, const Extra&... extra) {
         initialize([f](const Class *c, Arg... args) -> Return { return (c->*f)(args...); },
-                   (Return (*)(const Class *, Arg ...)) nullptr, extra...);
+                   (Return (*)(const Class *, Arg ...)) nullptr,
+                   detail::make_index_sequence<sizeof...(Arg) + 1>{}, extra...);
     }
 
     /// Return the function name
     object name() const { return attr("__name__"); }
 
 protected:
+    template <typename Arg> using is_args   = std::is_same<detail::intrinsic_t<Arg>, args>;
+    template <typename Arg> using is_kwargs = std::is_same<detail::intrinsic_t<Arg>, kwargs>;
+
     /// Space optimization: don't inline this frequently instantiated fragment
     PYBIND11_NOINLINE detail::function_record *make_function_record() {
         return new detail::function_record();
     }
 
     /// Special internal constructor for functors, lambda functions, etc.
-    template <typename Func, typename Return, typename... Args, typename... Extra>
-    void initialize(Func &&f, Return (*)(Args...), const Extra&... extra) {
-
+    template <typename Func, typename Return, typename... Args, size_t... Is, typename... Extra>
+    void initialize(Func &&f, Return (*)(Args...), detail::index_sequence<Is...>, const Extra&... extra) {
+        using namespace detail;
         struct capture { detail::remove_reference_t<Func> f; };
 
         /* Store the function including any extra state it might have (e.g. a lambda capture object) */
@@ -118,59 +176,43 @@ protected:
             rec->free_data = [](detail::function_record *r) { delete ((capture *) r->data[0]); };
         }
 
-        /* Type casters for the function arguments and return value */
-        using cast_in = detail::argument_loader<Args...>;
-        using cast_out = detail::make_caster<
-            detail::conditional_t<std::is_void<Return>::value, detail::void_type, Return>
-        >;
+        // Get args/kwargs argument positions relative to the end of the argument list:
+        constexpr auto args_pos = constexpr_first<is_args, Args...>() - (int) sizeof...(Args);
+        constexpr auto kwargs_pos = constexpr_first<is_kwargs, Args...>() - (int) sizeof...(Args);
 
-        static_assert(detail::expected_num_args<Extra...>(sizeof...(Args), cast_in::has_args, cast_in::has_kwargs),
+        constexpr auto args_kwargs_are_last = kwargs_pos >= - 1 && args_pos >= kwargs_pos - 1;
+        static_assert(args_kwargs_are_last, "py::args/py::kwargs are only permitted as the last argument(s) of a function");
+
+        constexpr auto has_kwargs = kwargs_pos < 0;
+        constexpr auto has_args = args_pos < 0;
+        static_assert(detail::expected_num_args<Extra...>(sizeof...(Args), has_args, has_kwargs),
                       "The number of argument annotations does not match the number of function arguments");
 
         /* Dispatch code which converts function arguments and performs the actual function call */
-        rec->impl = [](detail::function_call &call) -> handle {
-            cast_in args_converter;
-
-            /* Try to cast the function arguments into the C++ domain */
-            if (!args_converter.load_args(call))
-                return PYBIND11_TRY_NEXT_OVERLOAD;
-
-            /* Invoke call policy pre-call hook */
-            detail::process_attributes<Extra...>::precall(call);
-
-            /* Get a pointer to the capture object */
-            auto data = (sizeof(capture) <= sizeof(call.func.data)
-                         ? &call.func.data : call.func.data[0]);
-            capture *cap = const_cast<capture *>(reinterpret_cast<const capture *>(data));
-
-            /* Override policy for rvalues -- usually to enforce rvp::move on an rvalue */
-            const auto policy = detail::return_value_policy_override<Return>::policy(call.func.policy);
+        rec->impl = [](function_call &fc) -> handle {
+            /* Precall and postcall */
+            using policies = process_attributes<Extra...>;
 
             /* Function scope guard -- defaults to the compile-to-nothing `void_type` */
-            using Guard = detail::extract_guard_t<Extra...>;
+            using guard = extract_guard_t<Extra...>;
 
-            /* Perform the function call */
-            handle result = cast_out::cast(
-                std::move(args_converter).template call<Return, Guard>(cap->f), policy, call.parent);
-
-            /* Invoke call policy post-call hook */
-            detail::process_attributes<Extra...>::postcall(call, result);
-
-            return result;
+            return caller<capture, policies, guard, Return, Args...>::call(
+                fc, make_caster<Args>::try_load(fc.args[Is], fc.args_convert[Is])...
+            );
         };
 
         /* Process any user-provided function attributes */
         detail::process_attributes<Extra...>::init(extra..., rec);
 
         /* Generate a readable signature describing the function's arguments and return value types */
-        using detail::descr; using detail::_;
-        PYBIND11_DESCR signature = _("(") + cast_in::arg_names() + _(") -> ") + cast_out::name();
+        using cast_out = make_caster<conditional_t<std::is_void<Return>::value, void_type, Return>>;
+        PYBIND11_DESCR signature = _("(") + concat(make_caster<Args>::name()...) + _(") -> ") + cast_out::name();
 
         /* Register the function with Python from generic (non-templated) code */
         initialize_generic(rec, signature.text(), signature.types(), sizeof...(Args));
 
-        if (cast_in::has_args) rec->has_args = true;
-        if (cast_in::has_kwargs) rec->has_kwargs = true;
+        if (has_args) rec->has_args = true;
+        if (has_kwargs) rec->has_kwargs = true;
 
         /* Stash some additional information used by an important optimization in 'functional.h' */
         using FunctionType = Return (*)(Args...);
@@ -1024,10 +1066,9 @@ public:
         struct capture { Func func; };
         capture *ptr = new capture { std::forward<Func>(func) };
         install_buffer_funcs([](PyObject *obj, void *ptr) -> buffer_info* {
-            detail::make_caster<type> caster;
-            if (!caster.load(obj, false))
-                return nullptr;
-            return new buffer_info(((capture *) ptr)->func(caster));
+            if (auto result = detail::make_caster<type>::try_load(obj, false))
+                return new buffer_info(((capture *) ptr)->func(detail::extract<type &>(result)));
+            return nullptr;
         }, ptr);
         return *this;
     }
@@ -1467,7 +1508,7 @@ template <return_value_policy Policy = return_value_policy::reference_internal,
 
 template <typename InputType, typename OutputType> void implicitly_convertible() {
     auto implicit_caster = [](PyObject *obj, PyTypeObject *type) -> PyObject * {
-        if (!detail::make_caster<InputType>().load(obj, false))
+        if (!detail::make_caster<InputType>::try_load(obj, false))
             return nullptr;
         tuple args(1);
         args[0] = obj;
@@ -1797,8 +1838,8 @@ template <class T> function get_overload(const T *this_ptr, const char *name) {
         if (overload) { \
             auto o = overload(__VA_ARGS__); \
             if (pybind11::detail::cast_is_temporary_value_reference<ret_type>::value) { \
-                static pybind11::detail::overload_caster_t<ret_type> caster; \
-                return pybind11::detail::cast_ref<ret_type>(std::move(o), caster); \
+                static auto temp = pybind11::detail::make_caster<ret_type>::try_load(o, true); \
+                return pybind11::detail::cast_ref<ret_type>(temp, o); \
             } \
             else return pybind11::detail::cast_safe<ret_type>(std::move(o)); \
         } \

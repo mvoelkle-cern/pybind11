@@ -53,18 +53,20 @@ template <typename Type, typename Key> struct set_caster {
     using type = Type;
     using key_conv = make_caster<Key>;
 
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
         if (!isinstance<pybind11::set>(src))
-            return false;
+            return {};
+
         auto s = reinterpret_borrow<pybind11::set>(src);
-        value.clear();
+        auto result = maybe<Type>(in_place);
+
         for (auto entry : s) {
-            key_conv conv;
-            if (!conv.load(entry, convert))
-                return false;
-            value.insert(cast_op<Key &&>(std::move(conv)));
+            if (auto k = key_conv::try_load(entry, convert))
+                result->insert(extract<Key>(k));
+            else
+                return {};
         }
-        return true;
+        return result;
     }
 
     static handle cast(const type &src, return_value_policy policy, handle parent) {
@@ -77,27 +79,27 @@ template <typename Type, typename Key> struct set_caster {
         return s.release();
     }
 
-    PYBIND11_TYPE_CASTER(type, _("Set[") + key_conv::name() + _("]"));
+    PYBIND11_TYPE_CASTER2(type, _("Set[") + key_conv::name() + _("]"));
 };
 
 template <typename Type, typename Key, typename Value> struct map_caster {
     using key_conv   = make_caster<Key>;
     using value_conv = make_caster<Value>;
 
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
         if (!isinstance<dict>(src))
-            return false;
+            return {};
+
         auto d = reinterpret_borrow<dict>(src);
-        value.clear();
+        auto result = maybe<Type>(in_place);
         for (auto it : d) {
-            key_conv kconv;
-            value_conv vconv;
-            if (!kconv.load(it.first.ptr(), convert) ||
-                !vconv.load(it.second.ptr(), convert))
-                return false;
-            value.emplace(cast_op<Key &&>(std::move(kconv)), cast_op<Value &&>(std::move(vconv)));
+            auto k = key_conv::try_load(it.first.ptr(), convert);
+            auto v = value_conv::try_load(it.second.ptr(), convert);
+            if (!k || !v)
+                return {};
+            result->emplace(extract<Key>(k), extract<Value>(v));
         }
-        return true;
+        return result;
     }
 
     static handle cast(const Type &src, return_value_policy policy, handle parent) {
@@ -112,32 +114,34 @@ template <typename Type, typename Key, typename Value> struct map_caster {
         return d.release();
     }
 
-    PYBIND11_TYPE_CASTER(Type, _("Dict[") + key_conv::name() + _(", ") + value_conv::name() + _("]"));
+    PYBIND11_TYPE_CASTER2(Type, _("Dict[") + key_conv::name() + _(", ") + value_conv::name() + _("]"));
 };
 
 template <typename Type, typename Value> struct list_caster {
     using value_conv = make_caster<Value>;
 
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
         if (!isinstance<sequence>(src))
-            return false;
+            return {};
+
         auto s = reinterpret_borrow<sequence>(src);
-        value.clear();
-        reserve_maybe(s, &value);
+        auto result = maybe<Type>(in_place);
+        reserve_maybe(s, &*result);
+
         for (auto it : s) {
-            value_conv conv;
-            if (!conv.load(it, convert))
-                return false;
-            value.push_back(cast_op<Value &&>(std::move(conv)));
+            if (auto element = value_conv::try_load(it, convert))
+                result->push_back(extract<Value>(element));
+            else
+                return {};
         }
-        return true;
+        return result;
     }
 
 private:
     template <typename T = Type,
               enable_if_t<std::is_same<decltype(std::declval<T>().reserve(0)), void>::value, int> = 0>
-    void reserve_maybe(sequence s, Type *) { value.reserve(s.size()); }
-    void reserve_maybe(sequence, void *) { }
+    static void reserve_maybe(sequence s, Type *x) { x->reserve(s.size()); }
+    static void reserve_maybe(sequence, void *) { }
 
 public:
     static handle cast(const Type &src, return_value_policy policy, handle parent) {
@@ -152,7 +156,7 @@ public:
         return l.release();
     }
 
-    PYBIND11_TYPE_CASTER(Type, _("List[") + value_conv::name() + _("]"));
+    PYBIND11_TYPE_CASTER2(Type, _("List[") + value_conv::name() + _("]"));
 };
 
 template <typename Type, typename Alloc> struct type_caster<std::vector<Type, Alloc>>
@@ -166,31 +170,34 @@ template <typename ArrayType, typename Value, bool Resizable, size_t Size = 0> s
 
 private:
     template <bool R = Resizable>
-    bool require_size(enable_if_t<R, size_t> size) {
-        if (value.size() != size)
-            value.resize(size);
+    static bool require_size(ArrayType &array, enable_if_t<R, size_t> size) {
+        if (array.size() != size)
+            array.resize(size);
         return true;
     }
     template <bool R = Resizable>
-    bool require_size(enable_if_t<!R, size_t> size) {
+    static bool require_size(ArrayType &, enable_if_t<!R, size_t> size) {
         return size == Size;
     }
 
 public:
-    bool load(handle src, bool convert) {
+    static maybe<ArrayType> try_load(handle src, bool convert) {
         if (!isinstance<list>(src))
-            return false;
+            return {};
+
         auto l = reinterpret_borrow<list>(src);
-        if (!require_size(l.size()))
-            return false;
+        auto result = maybe<ArrayType>(in_place);
+        if (!require_size(*result, l.size()))
+            return {};
+
         size_t ctr = 0;
         for (auto it : l) {
-            value_conv conv;
-            if (!conv.load(it, convert))
-                return false;
-            value[ctr++] = cast_op<Value &&>(std::move(conv));
+            if (auto element = value_conv::try_load(it, convert))
+                (*result)[ctr++] = extract<Value>(element);
+            else
+                return {};
         }
-        return true;
+        return result;
     }
 
     static handle cast(const ArrayType &src, return_value_policy policy, handle parent) {
@@ -205,7 +212,7 @@ public:
         return l.release();
     }
 
-    PYBIND11_TYPE_CASTER(ArrayType, _("List[") + value_conv::name() + _<Resizable>(_(""), _("[") + _<Size>() + _("]")) + _("]"));
+    PYBIND11_TYPE_CASTER2(ArrayType, _("List[") + value_conv::name() + _<Resizable>(_(""), _("[") + _<Size>() + _("]")) + _("]"));
 };
 
 template <typename Type, size_t Size> struct type_caster<std::array<Type, Size>>
@@ -227,30 +234,31 @@ template <typename Key, typename Value, typename Hash, typename Equal, typename 
   : map_caster<std::unordered_map<Key, Value, Hash, Equal, Alloc>, Key, Value> { };
 
 // This type caster is intended to be used for std::optional and std::experimental::optional
-template<typename T> struct optional_caster {
-    using value_conv = make_caster<typename T::value_type>;
+template<typename Optional> struct optional_caster {
+    using value_type = typename Optional::value_type;
+    using value_caster = make_caster<value_type>;
 
-    static handle cast(const T& src, return_value_policy policy, handle parent) {
+    static handle cast(const Optional& src, return_value_policy policy, handle parent) {
         if (!src)
             return none().inc_ref();
-        return value_conv::cast(*src, policy, parent);
+        return value_caster::cast(*src, policy, parent);
     }
 
-    bool load(handle src, bool convert) {
+    static maybe<Optional> try_load(handle src, bool convert) {
         if (!src) {
-            return false;
+            return {};
         } else if (src.is_none()) {
-            return true;  // default-constructed value is already empty
+            return Optional{};  // default-constructed optional is empty
         }
-        value_conv inner_caster;
-        if (!inner_caster.load(src, convert))
-            return false;
 
-        value.emplace(cast_op<typename T::value_type &&>(std::move(inner_caster)));
-        return true;
+        if (auto result = value_caster::try_load(src, convert)) {
+            return extract<value_type>(result);
+        }
+
+        return {};
     }
 
-    PYBIND11_TYPE_CASTER(T, _("Optional[") + value_conv::name() + _("]"));
+    PYBIND11_TYPE_CASTER2(Optional, _("Optional[") + value_caster::name() + _("]"));
 };
 
 #if PYBIND11_HAS_OPTIONAL
@@ -298,26 +306,26 @@ template <typename Variant> struct variant_caster;
 template <template<typename...> class V, typename... Ts>
 struct variant_caster<V<Ts...>> {
     static_assert(sizeof...(Ts) > 0, "Variant must consist of at least one alternative.");
+    using Type = V<Ts...>;
 
     template <typename U, typename... Us>
-    bool load_alternative(handle src, bool convert, type_list<U, Us...>) {
-        auto caster = make_caster<U>();
-        if (caster.load(src, convert)) {
-            value = cast_op<U>(caster);
-            return true;
-        }
+    static maybe<Type> load_alternative(handle src, bool convert, type_list<U, Us...>) {
+        if (auto result = make_caster<U>::try_load(src, convert))
+            return extract<U>(result);
         return load_alternative(src, convert, type_list<Us...>{});
     }
 
-    bool load_alternative(handle, bool, type_list<>) { return false; }
+    static maybe<Type> load_alternative(handle, bool, type_list<>) { return {}; }
 
-    bool load(handle src, bool convert) {
+    static maybe<Type> try_load(handle src, bool convert) {
         // Do a first pass without conversions to improve constructor resolution.
         // E.g. `py::int_(1).cast<variant<double, int>>()` needs to fill the `int`
         // slot of the variant. Without two-pass loading `double` would be filled
         // because it appears first and a conversion is possible.
-        if (convert && load_alternative(src, false, type_list<Ts...>{}))
-            return true;
+        if (convert) {
+            if (auto result = load_alternative(src, false, type_list<Ts...>{}))
+                return result;
+        }
         return load_alternative(src, convert, type_list<Ts...>{});
     }
 
@@ -327,8 +335,7 @@ struct variant_caster<V<Ts...>> {
                                      std::forward<Variant>(src));
     }
 
-    using Type = V<Ts...>;
-    PYBIND11_TYPE_CASTER(Type, _("Union[") + detail::concat(make_caster<Ts>::name()...) + _("]"));
+    PYBIND11_TYPE_CASTER2(Type, _("Union[") + detail::concat(make_caster<Ts>::name()...) + _("]"));
 };
 
 #if PYBIND11_HAS_VARIANT

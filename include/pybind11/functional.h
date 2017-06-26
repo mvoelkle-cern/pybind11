@@ -22,15 +22,15 @@ struct type_caster<std::function<Return(Args...)>> {
     using function_type = Return (*) (Args...);
 
 public:
-    bool load(handle src, bool convert) {
+    static maybe<type> try_load(handle src, bool convert) {
         if (src.is_none()) {
             // Defer accepting None to other overloads (if we aren't in convert mode):
-            if (!convert) return false;
-            return true;
+            if (!convert) return {};
+            return type{};
         }
 
         if (!isinstance<function>(src))
-            return false;
+            return {};
 
         auto func = reinterpret_borrow<function>(src);
 
@@ -49,18 +49,16 @@ public:
             if (rec && rec->is_stateless &&
                     same_type(typeid(function_type), *reinterpret_cast<const std::type_info *>(rec->data[1]))) {
                 struct capture { function_type f; };
-                value = ((capture *) &rec->data)->f;
-                return true;
+                return ((capture *) &rec->data)->f;
             }
         }
 
-        value = [func](Args... args) -> Return {
+        return [func](Args... args) -> Return {
             gil_scoped_acquire acq;
             object retval(func(std::forward<Args>(args)...));
             /* Visual studio 2015 parser issue: need parentheses around this expression */
             return (retval.template cast<Return>());
         };
-        return true;
     }
 
     template <typename Func>
@@ -75,10 +73,8 @@ public:
             return cpp_function(std::forward<Func>(f_), policy).release();
     }
 
-    PYBIND11_TYPE_CASTER(type, _("Callable[[") +
-            argument_loader<Args...>::arg_names() + _("], ") +
-            make_caster<retval_type>::name() +
-            _("]"));
+    PYBIND11_TYPE_CASTER2(type, _("Callable[[") + concat(make_caster<Args>::name()...) + _("], ")
+                                + make_caster<retval_type>::name() + _("]"));
 };
 
 NAMESPACE_END(detail)

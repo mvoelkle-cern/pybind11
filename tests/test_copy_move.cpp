@@ -70,14 +70,14 @@ public:
 };
 namespace pybind11 { namespace detail {
 template <> struct type_caster<MoveOnlyInt> {
-    PYBIND11_TYPE_CASTER(MoveOnlyInt, _("MoveOnlyInt"));
-    bool load(handle src, bool) { value = MoveOnlyInt(src.cast<int>()); return true; }
+    PYBIND11_TYPE_CASTER2(MoveOnlyInt, _("MoveOnlyInt"));
+    static maybe<MoveOnlyInt> try_load(handle src, bool) { return src.cast<int>(); }
     static handle cast(const MoveOnlyInt &m, return_value_policy r, handle p) { return pybind11::cast(m.value, r, p); }
 };
 
 template <> struct type_caster<MoveOrCopyInt> {
-    PYBIND11_TYPE_CASTER(MoveOrCopyInt, _("MoveOrCopyInt"));
-    bool load(handle src, bool) { value = MoveOrCopyInt(src.cast<int>()); return true; }
+    PYBIND11_TYPE_CASTER2(MoveOrCopyInt, _("MoveOrCopyInt"));
+    static maybe<MoveOrCopyInt> try_load(handle src, bool) { return src.cast<int>(); }
     static handle cast(const MoveOrCopyInt &m, return_value_policy r, handle p) { return pybind11::cast(m.value, r, p); }
 };
 
@@ -86,17 +86,14 @@ protected:
     CopyOnlyInt value;
 public:
     static PYBIND11_DESCR name() { return _("CopyOnlyInt"); }
-    bool load(handle src, bool) { value = CopyOnlyInt(src.cast<int>()); return true; }
+    static maybe<CopyOnlyInt> try_load(handle src, bool) { return src.cast<int>(); }
     static handle cast(const CopyOnlyInt &m, return_value_policy r, handle p) { return pybind11::cast(m.value, r, p); }
     static handle cast(const CopyOnlyInt *src, return_value_policy policy, handle parent) {
         if (!src) return none().release();
         return cast(*src, policy, parent);
     }
-    operator CopyOnlyInt*() { return &value; }
-    operator CopyOnlyInt&() { return value; }
-    template <typename T> using cast_op_type = pybind11::detail::cast_op_type<T>;
 };
-}}
+}} // namespace pybind11::detail
 
 struct PrivateOpNew {
     int value = 1;

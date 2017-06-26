@@ -37,25 +37,24 @@ template <typename T> struct is_fmt_numeric<std::complex<T>, detail::enable_if_t
 
 template <typename T> class type_caster<std::complex<T>> {
 public:
-    bool load(handle src, bool convert) {
+    static maybe<std::complex<T>> try_load(handle src, bool convert) {
         if (!src)
-            return false;
+            return {};
         if (!convert && !PyComplex_Check(src.ptr()))
-            return false;
+            return {};
         Py_complex result = PyComplex_AsCComplex(src.ptr());
         if (result.real == -1.0 && PyErr_Occurred()) {
             PyErr_Clear();
-            return false;
+            return {};
         }
-        value = std::complex<T>((T) result.real, (T) result.imag);
-        return true;
+        return {in_place, static_cast<T>(result.real), static_cast<T>(result.imag)};
     }
 
     static handle cast(const std::complex<T> &src, return_value_policy /* policy */, handle /* parent */) {
         return PyComplex_FromDoubles((double) src.real(), (double) src.imag());
     }
 
-    PYBIND11_TYPE_CASTER(std::complex<T>, _("complex"));
+    PYBIND11_TYPE_CASTER2(std::complex<T>, _("complex"));
 };
 NAMESPACE_END(detail)
 NAMESPACE_END(pybind11)

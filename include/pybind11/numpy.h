@@ -955,17 +955,18 @@ template <typename T, int ExtraFlags>
 struct pyobject_caster<array_t<T, ExtraFlags>> {
     using type = array_t<T, ExtraFlags>;
 
-    bool load(handle src, bool convert) {
+    static maybe<type> try_load(handle src, bool convert) {
         if (!convert && !type::check_(src))
-            return false;
-        value = type::ensure(src);
-        return static_cast<bool>(value);
+            return {};
+        if (auto value = type::ensure(src))
+            return std::move(value);
+        return {};
     }
 
     static handle cast(const handle &src, return_value_policy /* policy */, handle /* parent */) {
         return src.inc_ref();
     }
-    PYBIND11_TYPE_CASTER(type, handle_type_name<type>::name());
+    PYBIND11_TYPE_CASTER2(type, handle_type_name<type>::name());
 };
 
 template <typename T>
