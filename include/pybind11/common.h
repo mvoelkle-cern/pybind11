@@ -686,6 +686,16 @@ constexpr bool all_fold(bool a, bool b, bool c, bool d, Bools... bools) {
 }
 #endif
 
+// GCC 4 doesn't implement is_trivially_copyable, so approximate it
+#if !defined(__GNUG__) || defined(__clang__) || __GNUC__ >= 5
+using std::is_trivially_copyable;
+#else
+template <typename T>
+using is_trivially_copyable = satisfies_all_of<T, std::is_trivially_destructible,
+                                                  std::has_trivial_copy_constructor,
+                                                  std::has_trivial_copy_assign>;
+#endif
+
 NAMESPACE_END(detail)
 
 /// Returns a named pointer that is shared among all extension modules (using the same

@@ -56,7 +56,7 @@ struct maybe_storage<T, /*is_trivially_destructible*/false> {
 };
 
 /// Defines: copy and move constructors
-template <typename T, bool = std::is_trivially_copyable<T>::value>
+template <typename T, bool = detail::is_trivially_copyable<T>::value>
 struct maybe_base;
 
 template <typename T>
@@ -119,16 +119,16 @@ public:
     constexpr bool has_value() const noexcept { return initialized; }
     constexpr explicit operator bool() const noexcept { return initialized; }
 
-    constexpr const T &value() const & noexcept { return something; }
-    constexpr T &value() & noexcept { return something; }
-    constexpr T &&value() && noexcept { return std::move(something); }
+    const T &value() const & noexcept { return something; }
+    T &value() & noexcept { return something; }
+    T &&value() && noexcept { return std::move(something); }
 
-    constexpr const T &operator*() const & noexcept { return something; }
-    constexpr T &operator*() & noexcept { return something; }
-    constexpr T &&operator*() && noexcept { return std::move(something);}
+    const T &operator*() const & noexcept { return something; }
+    T &operator*() & noexcept { return something; }
+    T &&operator*() && noexcept { return std::move(something);}
 
-    constexpr const T *operator->() const noexcept { return &something; }
-    constexpr T *operator->() noexcept { return &something; }
+    const T *operator->() const noexcept { return &something; }
+    T *operator->() noexcept { return &something; }
 };
 
 /// A tag which indicates the target type for a `maybe` value extraction
